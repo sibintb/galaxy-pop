@@ -26,8 +26,38 @@ void main() async {
   runApp(const BubbleShooterApp());
 }
 
-class BubbleShooterApp extends StatelessWidget {
+// --- Root Widget with Lifecycle Management ---
+class BubbleShooterApp extends StatefulWidget {
   const BubbleShooterApp({super.key});
+
+  @override
+  State<BubbleShooterApp> createState() => _BubbleShooterAppState();
+}
+
+class _BubbleShooterAppState extends State<BubbleShooterApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Initialize Audio once at the top level
+    AudioManager.init();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      AudioManager.pauseMusic();
+    } else if (state == AppLifecycleState.resumed) {
+      AudioManager.resumeMusic();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -66,10 +96,13 @@ class GameData {
 
 class AudioManager {
   static final AudioPlayer _musicPlayer = AudioPlayer();
-  static final AudioPlayer _sfxPlayer = AudioPlayer();
+  // We don't keep a single static SFX player to allow overlapping sounds
 
-  static void init() {
-    _musicPlayer.setReleaseMode(ReleaseMode.loop);
+  static void init() async {
+    await _musicPlayer.setReleaseMode(ReleaseMode.loop);
+    await _musicPlayer.setPlayerMode(
+      PlayerMode.mediaPlayer,
+    ); // Better for background music
     if (GameData.musicEnabled) {
       playMusic();
     }
@@ -78,9 +111,28 @@ class AudioManager {
   static void playMusic() async {
     if (!GameData.musicEnabled) return;
     try {
-      await _musicPlayer.play(AssetSource('audio/music.mp3'), volume: 0.3);
+      if (_musicPlayer.state != PlayerState.playing) {
+        await _musicPlayer.play(AssetSource('audio/music.mp3'), volume: 0.3);
+      }
     } catch (e) {
-      // Asset might be missing, ignore
+      debugPrint("Error playing music: $e");
+    }
+  }
+
+  static void pauseMusic() {
+    if (_musicPlayer.state == PlayerState.playing) {
+      _musicPlayer.pause();
+    }
+  }
+
+  static void resumeMusic() {
+    if (GameData.musicEnabled) {
+      if (_musicPlayer.state == PlayerState.paused) {
+        _musicPlayer.resume();
+      } else if (_musicPlayer.state == PlayerState.stopped ||
+          _musicPlayer.state == PlayerState.completed) {
+        playMusic();
+      }
     }
   }
 
@@ -91,15 +143,20 @@ class AudioManager {
   static void playSfx(String fileName) async {
     if (!GameData.soundEnabled) return;
     try {
-      // For overlapping SFX, we might need multiple players or low latency mode,
-      // but keeping it simple here with one player for UI sounds.
-      // For rapid game sounds, creating a new player is often safer in Flutter:
+      // Create a new player for each SFX to allow overlap
       final player = AudioPlayer();
+      await player.setPlayerMode(
+        PlayerMode.lowLatency,
+      ); // Optimizes for short sounds
       await player.play(AssetSource('audio/$fileName'), volume: 0.5);
       player.onPlayerComplete.listen((event) => player.dispose());
     } catch (e) {
-      // Asset missing
+      debugPrint("Error playing SFX: $e");
     }
+  }
+
+  static void playDestroy() {
+    playSfx('destroy.mp3');
   }
 
   static void vibrate() {
@@ -133,7 +190,7 @@ class _MainMenuScreenState extends State<MainMenuScreen>
   @override
   void initState() {
     super.initState();
-    AudioManager.init();
+    // Audio init moved to App root to prevent resetting on navigation
     _bgController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 10),
@@ -484,7 +541,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
     _swapController.addStatusListener((status) {
       if (status == AnimationStatus.completed) {
-        // Actually swap data when animation finishes (or halfway)
+        // Actually swap data when animation finishes
         final temp = currentBubbleColor;
         currentBubbleColor = nextBubbleColor;
         nextBubbleColor = temp;
@@ -664,7 +721,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   void _snapBubbleToGrid(Offset pos) {
-    AudioManager.playSfx('pop.mp3'); // Impact sound
+    // Only play impact sound here
+    AudioManager.playSfx('pop.mp3');
     AudioManager.vibrate();
 
     int bestR = -1;
@@ -745,8 +803,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
 
     if (matched.length >= 3) {
-      // Pop Sound if heavy match?
-      if (matched.length > 5) AudioManager.playSfx('pop.mp3');
+      // Play specific destroy sound for matches
+      AudioManager.playDestroy();
 
       for (var p in matched) {
         grid[p.x][p.y] = null;
